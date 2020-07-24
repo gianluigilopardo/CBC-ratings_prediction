@@ -1,0 +1,622 @@
+---
+title: "Caso studio Colonial Broadcasting Company"
+author: "Gianluigi Lopardo, 277268"
+output:
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+# Introduzione  
+Il dataset a disposizione del management della CBC contiene i dati dei film trasmessi in TV nel 1992 dalle tre principali reti televisive statunitensi: ABN, BBS e CBC.
+
+Lo scopo di questo lavoro è analizzare come e quanto le caratteristiche di un film influiscano sul suo rating. Capire quali sono gli attributi che maggiormente pesano sul successo o sul flop di una rappresentazione televisiva è importante per decidere la programmazione, per valutare l'acquisto di un film, per studiare il comportamento della concorrenza. 
+Pertanto, dalle informazioni ricavate da questa analisi, sarà possibile estrarre del valore per tutti gli stakeholder.
+
+I rating presi in considerazione sono i [Nielsen ratings](https://en.wikipedia.org/wiki/Nielsen_ratings): il rapporto tra il numero di televisioni collegate ad un determinato canale sul numero di famiglie totali che hanno una televisione.
+Nel 1992, ogni punto di rating rappresentava 921.000 famiglie americane, quindi la base era di circa 92.1 milioni di famiglie.
+
+##Informazioni sugli attributi
+Prima di esplorare il dataset, e di conseguenza costruire opportuni modelli, vediamo quali sono gli attributi a disposizione.
+
+* *network*: ABN, BBS, CBC
+* *fact*: 1 se si tratta di un film fact-baset, 0 altrimenti
+* *stars*: numero di star tra gli attori (definiti come attori pagati più di $300.000, sono al massimo 2)
+* *month*: mese in cui è stato trasmesso il film (esclusi i tre mesi estivi: 6,7,8)
+* *day*: giorno in cui è stato trasmesso il film (1:Lun, 2:Mar, 7:Dom)
+* *rating*: Nielsen rating per il film
+* *prevratings*: Nielsen rating per il programma immediatamente precedente il film sulla stessa rete
+* *competition*: Media dei Nielsen rating ricevuti dalle due reti concorrenti
+durante la trasmissione del film
+* *bbs*: 1 se NETWORK = BBS, 0 altrimenti
+* *abn*: 1 se NETWORK = ABN, 0 altrimenti
+* *march*: 1 se MONTH = 3, 0 altrimenti
+* *aprmay*: 1 se MONTH = 4 o 5, 0 altrimenti
+* *oct*: 1 se MONTH = 10, 0 altrimenti
+* *dec*: 1 se MONTH = 12, 0 altrimenti
+* *mon*: 1 se DAY = 1, 0 altrimenti
+* *sun*: 1 se DAY = 7, 0 altrimenti
+
+Da notare la presenza di variabili dummy (le ultime 8) che derivano direttamente da quelle precedenti.
+Queste si possono dividere in tre aree: rete, mese, giorno:
+
+* Per la *rete*, sono presenti le due variabili dummy *abn* e *bbs*. La terza, corrispondente alla rete CBC, sarebbe superflua, in quanto linearmente dipende dalle altre due ed è pertanto usata come caso base. *abn*=0 e *bbs*=0 implicano quindi che la rete in esame è la CBC.
+* Per il *mese* abbiamo: *march*, *aprmay*, *oct*, *dec*. Quindi i mesi di Aprile e Maggio sono stati "accorpati" in un'unica variabile dummy, mentre per Marzo, Ottobre e Dicembre ce n'è una. I mesi di Gennaio, Febbraio, Settembre e Novembre sono presi come caso base, che si verifica quando tutte le dummy del *mese* sono uguali a 0 (ricordiamo che nel dataset non sono disponibili i dati relativi ai mesi di Giugno, Luglio e Agosto).
+* Per il *giorno* vengono considerati il Lunedì e la Domenica, mentre il caso base corrisponde al Martedì (ricordiamo che nel dataset sono disponibili i dati solo relativi ai giorni Lunedì, Martedì e Domenica).
+
+Le variabili binari riportate rappresentano casi che più si discostano dal valore medio. Va tenuto presente che è opportuno minimizzare il numero di variabili di questo tipo.
+Infine, notare che la variabile target dell'analisi è l'attributo *rating*, che assume valori reali.
+
+# Esplorazione dei dati
+Prima di entrare nell'analisi vera e propria, quindi nella costruzione dei modelli, è opportuno analizzare i dati a disposizione. Spesso, anche un semplice grafico può dare informazioni utili e aiutare nel decidere come procedere.
+
+## Data preprocessing
+Come prima cosa, importiamo il dataset e ne guardiamo i valori, controllando che non ce ne siano di nulli.
+```{r}
+rm(list = ls()) #pulisco il workspace
+#libraries
+library(ggplot2)
+library(gridExtra)
+library(corrplot)
+library(ISLR)
+library(leaps)
+library(boot)
+library(glmnet)
+set.seed(42) #setto un seme per replicabilità
+DIR <- 'C:/Users/Gianluigi/Desktop/PoliTO/Business Analytics LAB/Homework/1. CBC'
+setwd(DIR) #setto la directory di lavoro
+
+df <- read.csv('CBC.csv')
+attach(df)
+n_row <- dim(df)[1]
+n_col <- dim(df)[2]
+cat('Il dataset contiene', n_row,'record e', n_col, 'attributi.' )
+null <- sum((is.na(df)))
+cat(ifelse(null > 0, 'Ci sono ' + null + ' valori nulli o mancanti.', 
+             'Non ci sono valori nulli o mancanti.'))
+summary(df)
+```
+
+A parte l'attributo *network*, tutti i valori del dataset sono in forma numerica. In particolare, gli attributi *rating*, *prevratings* e *competition* assumono valori reali, come atteso. Le altre variabili assumono invece valori interi. Questo, però, implica concetti di ordinamento e di distanza che in alcuni casi non sono propriamente sensati: mercoledì viene prima o dopo di giovedì? (Non si riferiscono, in generale, alla settimana.) In altri casi invece non ci interessano: non stiamo cercando un andamento nel tempo basato sullo scorrere dei mesi. Vogliamo fare, invece, uno studio qualitativo: ci interessa, ad esempio, sapere se in alcuni mesi, indipendentemente da tutto il resto, i rating sono significativamente superiori o inferiori. Questo potrebbe essere legato a vari fattori: magari nei mesi freddi si esce meno e le famiglie trascorrono più tempo guardando la TV, contrariaramente al mese di agosto. Inolte, diverse variabili assumono valori binari. Anche queste, non possono essere trattate come semplici variabili intere: che senso ha dire che che la media dell'attributo *march* è 0.1364? 
+
+Prima di procedere, sarebbe quindi opportuno trasformare alcuni attributi in valori categorici: in R sono definiti [**factors**](https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/factor).
+Di fatto, per ognungo di questi attributi, ne verrebbero aggiunti tanti quanti sono i "livelli" assunti. Questo porta ad un notevole aumento di attributi, ma in particolare nel nostro caso sarebbero ridondanti: abbiamo già a disposizione le variabili dummy che riportano le stesse informazioni, a meno di accorpamenti (vedi *aprmay*). 
+
+Al fine di limitare il numero di variabili categoriche, senza però perdere significative informazioni, si potrebbe procedere escludendo le variabili *network*, *month* e *day* dall'analisi statistica.
+
+Dato che queste sono comunque utili per la visualizzazione, procediamo salvandole in un dataframe a parte.
+
+```{r}
+df$fact <- as.factor(fact)
+df$month <- as.factor(month)
+levels(df$month) <- c('gen','feb','mar','apr','mag','set','ott','nov','dec')
+df$day <- as.factor(day)
+levels(df$day) <- c('lun','mar','dom')
+df$bbs <- as.factor(bbs)
+df$abn <- as.factor(abn)
+df$oct <- as.factor(oct)
+df$dec <- as.factor(dec)
+df$aprmay <- as.factor(aprmay)
+df$mon <- as.factor(mon)
+df$sun <- as.factor(sun)
+df$march <- as.factor(march)
+detach(df)
+attach(df)
+ds <- df[-5] #rimuovo day
+ds <- ds[-4] #rimuovo month
+ds <- ds[-1] #rimuovo network
+attach(ds)
+
+summary(ds)
+summary(df)
+```
+
+Da notare che il dataset dispone di soli 88 record, pertanto sarà necessario prestare particolare attenzione durante la fase di validazione: vedremo, ad esempio, che la divisione in train e test sample influenza notevolmente le prestazioni dei modelli. 
+
+
+## Visualizzazione dati
+Abbiamo verificato che nel dataset non ci siano valori nulli o non validi. Tutte le variabili del dataset sono state trasformate nel formato opportuno. Adesso possiamo iniziare a visualizzare i nostri dati.
+
+Come prima cosa, vediamo la distribuzione del *rating*, che è il valore target. Iniziamo a notare com'è influenzato dalle variabili categoriche. Poi ne studiamo la relazione con le due variabili reali *prevratings* e *competition*.
+
+```{r}
+ggplot(data = df, aes(x = rating)) +
+  geom_histogram(fill = "steelblue", bins = 30)
+```
+
+
+```{r}
+ggplot(data = df, aes(x = day, y = rating, fill = fact)) + 
+  geom_boxplot(position = "dodge")
+
+ggplot(data = df, aes(x = month, y = rating)) + 
+  geom_boxplot(fill = "steelblue", position = "dodge")
+
+ggplot(data = df, aes(x = network, y = rating, fill = fact)) + 
+  geom_boxplot(position = "dodge")
+
+ggplot(data = df, aes(x = fact, y = rating)) + 
+  geom_boxplot(fill = "steelblue", position = "dodge")
+```
+
+Analizzando il legame tra *rating* e gli altri attributi, sembrerebbe che *fact* e *network* abbiano una forte influenza. Ovvero, dai grafici si vede che i film basati su storie vere hanno in media un *rating* più alto.
+
+```{r}
+ggplot(data = df, aes(x = rating, fill = fact)) +
+  geom_density(alpha = 0.5)
+```
+
+Inoltre, sembra che questo comportamento dipenda dalla rete televisiva da cui il film è trasmesso.
+
+```{r}
+ggplot(data = df, aes(x = rating, fill = network)) +
+  geom_density(alpha = 0.5)
+```
+
+```{r}
+ggplot(data = df, aes(x = prevratings, y = rating)) +
+  geom_point() + geom_smooth(method = "loess", se = TRUE)
+
+cor(prevratings, rating)
+```
+
+```{r}
+ggplot(data = df, aes(x = prevratings, y = rating, 
+                      color = fact)) + 
+  geom_point() + geom_smooth(method = "loess", se = FALSE) + 
+  ggtitle("Plot rating - prevratings, fact")
+
+ggplot(data = df, aes(x = prevratings, y = rating, 
+                      color = network, shape = fact)) + 
+  geom_point() + 
+  ggtitle("Plot rating - prevratings, network")
+```
+
+```{r}
+#Distribuzione del rating per network e fact
+p_abn <- ggplot(data = df[which(df$network == 'ABN'),], aes(x = rating, fill = fact)) +
+  geom_density(alpha = 0.5) + ggtitle("Network: ABN")
+p_bbs <- ggplot(data = df[which(df$network == 'BBS'),], aes(x = rating, fill = fact)) +
+  geom_density(alpha = 0.5) + ggtitle("Network: BBS")
+p_cbc <- ggplot(data = df[which(df$network == 'CBC'),], aes(x = rating, fill = fact)) +
+  geom_density(alpha = 0.5) + ggtitle("Network: CBC")
+
+grid.arrange(p_abn, p_bbs, p_cbc, top = "Distribuzione del rating per network e fact")
+```
+
+```{r}
+ggplot(data = df, aes(x = competition, y = rating)) +
+  geom_point() + geom_smooth(method = "loess", se = TRUE)
+
+cor(competition, rating)
+```
+
+```{r}
+ggplot(data = df, aes(x = competition, y = rating, 
+                      color = fact)) + 
+  geom_point() + geom_smooth(method = "loess", se = FALSE) + 
+  ggtitle("Plot rating - competition, fact")
+
+ggplot(data = df, aes(x = competition, y = rating, 
+                      color = network, shape = fact)) + 
+  geom_point() + 
+  ggtitle("Plot rating - competition, network")
+```
+
+
+```{r}
+xstars <- as.factor(stars)
+ggplot(data = df, aes(x = xstars, y = rating)) + 
+  geom_boxplot(fill = "steelblue", position = "dodge")
+df$stars <- as.numeric(df$stars)
+```
+
+Non sembra esserci una sostanziale differenza tra il rating dei film con nessuna star e quelli che ne hanno una. Invece, i film con due star del dataset hanno in media rating decisamente più elevati. Questo andamento sembra anomalo, proviamo ad entrare più a fondo.
+
+```{r}
+cat('Nel dataset ci sono', dim(df[which(df$stars == 0),])[1], 
+    'film con nessuna star,', dim(df[which(df$stars == 1),])[1], 
+    'film con una star e', dim(df[which(df$stars == 2),])[1], 
+    'film con due star.')
+df[which(df$stars == 2),]
+```
+
+I film con due star sono solo due e sono stati trasmessi entrambi dalla rete ABN, di domenica, in mesi freddi (Novembre e Dicembre) e non sono basati su una storia vera. La differenza nel rating è quindi da considerarsi molto poco significativa.
+
+Vediamo ora la correlazione tra le variabili reali:
+```{r}
+num_df <- df[, sapply(df, is.numeric)]
+corr_df = cor(num_df)
+corrplot(corr_df, method = "number", type = "lower")
+```
+
+Come atteso, *rating* e *prevratings* sono positivamente correlate. Questa informazione è molto utile: un programma o un film con un buon punteggio fanno da leva per il film successivo. Per una rete televisiva, questa informazione suggerisce un piano molto efficace: insire in programmazione un film di cui si sa che ha un punteggio notoriamente alto, magari perché già proposto molte volte in passato, prima di mandare in onda il nuovo film. 
+
+Anche *competition* ha una correlazione non trascurabile con *rating*, ma questa volta negativa. Per una analisi descrittiva, potrebbe essere molto interessante capire come i rating dei film delle reti concorrenti influenzano quelli di CBC. Tuttavia, va tenuto presente che si tratta di una variabile stocastica, che si realizza contemporaneamente al nostro *rating*. Sarebbe quindi più complesso usarla per una analisi predittiva. Questo va valutato bene: se si conosce con anticipo la programmazione delle reti concorrenti, per i film già proiettati molte volte in passato, per cui quindi si ha una discreta conoscenza, si potrebbe usare il valore atteso. In generale, tuttavia, si ha un'incertezza troppo elevata su queste informazioni. 
+
+Su *prevrating* si potrebbero fare discorsi analoghi, ma questa variabile è più facilmente controllabile da CBC e inserendo come detto un programma con poca incertezza sul rating, può essere trattata come deterministica.
+
+Questi ragionamenti suggeriscono quindi di sviluppare un modello che escluda l'attributo *competition* dall'analisi. 
+
+
+# Costruzione dei modelli
+
+## Modello completo
+Iniziamo valutando le prestazioni del modello completo, applicando la regressione lineare sull'intero dataset e usando tutte le variabili a disposizione, compresa *competition*. Valutiamo così l'impatto della sua eliminazione.
+
+```{r}
+reg_full <- lm(rating ~ ., data = ds)
+summary(reg_full)
+```
+
+```{r}
+reg <- lm(rating ~ .-competition, data = ds)
+summary(reg)
+```
+
+Si nota effettivamente un peggioramento non trascurabile sia in termini di $RSS$ che di $R^2_{adj}$. Il peggioramento del parametro $R^2$ non fa chiaramente testo, visto che i modelli hanno un numero diverso di variabili. 
+
+Anche $AIC$ e $BIC$ peggiorano, a conferma che *competition* sia effettivamente un attributo significativo da un punto di vista statistico. 
+
+```{r}
+AIC(reg_full, reg)
+BIC(reg_full, reg)
+```
+
+Tuttavia, per quanto detto sopra, procediamo escludendola.
+```{r}
+ds <- ds[-5]
+p <- ncol(ds)-1 
+n <- nrow(ds)
+```
+
+## Approccio greedy: selezione graduale in avanti e all'indietro 
+Il modo ottimale per selezionare il sottoinsieme ottimale di variabili sarebbe quello di trovare, per ogni valore $k$ da 1 a $p$ = #predittori, il modello più efficiente avente $k$ attributi, utilizzando parametri come $SSR$ o $R^2$ per il confronto. Una volta a disposizione questi $k$ modelli, si sceglie il migliore utilizzando una metrica che penalizzi modelli troppo onerosi in termini di numerosità di variabili, come ad esempio l' $R^2_{adj}$ oppure mediante approcci di validazione come *cross-validation*.
+
+Chiaramente, questo approccio richiederebbe uno sforzo computazionale non indifferente se si hanno a dispozione tante variabili. Sarebbero infatti $2^p$ modelli, quindi 144 nel nostro caso.
+
+Per evitare questo sforzo computazionale, che potrebbe non essere giustificato dalle prestazioni, è possibile applicare approcci greedy. Possiamo, in particolare, utilizzare due semplici procedure di selezione graduale:
+
+* *forward stepwise selection*: si inizia dal modello nullo e viene aggiunta una variabile alla volta, scegliendo quella che migliora maggiormente l'$SSR$ o $R^2$. 
+
+* *backward stepwise selection*: si inizia dal modello completo e viene rimossa una variabile alla volta: quella che dà il minore contributo in termini di efficienza.
+
+In entrambi i casi, alla fine si ottengono $p$ modelli e si scegliere tra essi usando cross-validation o $R^2_{adj}$.
+
+Questi approcci sono greedy, in quanto una volta "presa una decisione", non si torna più indietro: le variabili aggiunte nel caso forward (rispettivamente, rimosse nel caso backward) saranno contenute in tutti i modelli successivi (saranno escluse nel caso backward).  
+
+```{r}
+reg_fwd <- regsubsets(rating ~ ., data = ds, method = "forward", nvmax = p)
+fwd_summary <- summary(reg_fwd)
+fwd_summary
+```
+Il primo attributo inserito è *prevratings*, che sembrerebbe ancora il più significativo, seguito da *fact*.  Le ultime due aggiunte sono invece *abn* e *march*.
+```{r}
+reg_bwd <- regsubsets(rating ~ ., data = ds, method = "backward", nvmax = p)
+bwd_summary <- summary(reg_bwd)
+bwd_summary
+```
+In questo caso la prima variabile ad essere rimossa è *march*, che sembra essere la meno importante. Da notare che qui *abn* viene esclusa solo nel modello con una variabile, in cui è presente *aprmay*. L'attributo *prevrating* viene invece rimosso già nel modello con 7 variabili.
+
+Una volta trovati i migliori modelli per ogni numero di attributi e per entrambi i metodi, bisogna confrontarli tra loro. Per farlo, confrontiamo l'andamento di $RSS$, $R^2_{adj}$, $C_p$ e $BIC$. Da tener presente che mentre gli ultimi tre penalizzano modelli con troppe variabili, l'$RSS$ tende a decrescere all'aumentare degli attributi. 
+```{r}
+par(mfrow = c(2,2))
+
+plot(fwd_summary$adjr2, xlab = 'numero di attributi', ylab = 'R2 adj', type = 'b', col = 'red', lwd = 2)
+points(10, fwd_summary$adjr2[10], col = 'red', cex = 2, pch = 20)
+lines(bwd_summary$adjr2, xlab = 'numero di attributi', ylab = 'R2 adj', type = 'b', col = 'blue', lwd = 1.5)
+points(10, bwd_summary$adjr2[10], col = 'blue', cex = 2, pch = 20)
+legend(6, 0.35,legend = c('Forward', 'Backward'), col = c('red', 'blue'), lty = 1, cex = 0.9)
+
+plot(fwd_summary$bic, xlab = 'numero di attributi', ylab = 'BIC', type = 'b', col = 'red', lwd = 1.5)
+points(4, fwd_summary$bic[4], col = 'red', cex = 2, pch = 20)
+lines(bwd_summary$bic, xlab = 'numero di attributi', ylab = 'BIC', type = 'b', col = 'blue', lwd = 1.5)
+points(6, bwd_summary$bic[6], col = 'blue', cex = 2, pch = 20)
+legend(4.5, -8, legend = c('Forward', 'Backward'), col = c('red', 'blue'), lty = 1, cex = 0.9)
+
+plot(bwd_summary$cp, xlab = 'numero di attributi', ylab = 'Cp', type = 'b', col = 'blue', lwd = 1.5)
+points(7, bwd_summary$cp[7], col = 'blue', cex = 2, pch = 20)
+lines(fwd_summary$cp, xlab = 'numero di attributi', ylab = 'Cp', type = 'b', col = 'red', lwd = 1.5)
+points(7, fwd_summary$cp[7], col = 'red', cex = 2, pch = 20)
+legend(6, 50, legend = c('Forward', 'Backward'), col = c('red', 'blue'), lty = 1, cex = 0.9)
+
+plot(fwd_summary$rss, xlab = 'numero di attributi', ylab = 'RSS', type = 'b', col = 'red', lwd = 1.5)
+points(11, fwd_summary$rss[11], col = 'red', cex = 2, pch = 20)
+lines(bwd_summary$rss, xlab = 'numero di attributi', ylab = 'RSS', type = 'b', col = 'blue', lwd = 1.5)
+points(11, fwd_summary$bic[11], col = 'blue', cex = 2, pch = 20)
+legend(6, 420, legend = c('Forward', 'Backward'), col = c('red', 'blue'), lty = 1, cex = 0.9)
+```
+
+Osservando per ogni parametro:
+
+* $R^2_{adj}$: il modello ottimale è quello con 10 attributi, in entrambi i casi si eclude solo *march*.
+
+* $BIC$: l'algoritmo *forward* è leggermente più rigido del *backward*, selezionando un modello con 4 variabili anziché 6.
+```{r}
+coef(reg_fwd, 4)
+coef(reg_bwd, 6)
+```
+* $C_p$: in entrambi i casi il modello ottimale ha 6 variabili, ma qui sono modelli diversi.
+
+```{r}
+coef(reg_fwd, 6)
+coef(reg_bwd, 6)
+```
+* $RSS$: chiaramente in questo caso il valore ottimale si ottiene col massimo numero di variabili.
+
+## Ricerca esaustiva
+Usiamo ora la "forza bruta": applichiamo l'algoritmo di ricerca esaustiva per la scelta del miglior sottoinsieme di attributi. Come già detto, questo algoritmo è molto più oneroso di quelli greedy, ma trattandosi di numeri non troppo elevati ($2^p = 2^{11} = 121$), può essere applicato senza particolari sforzi computazionali.
+```{r}
+reg_ex <- regsubsets(rating ~ ., data = ds, nvmax = p)
+ex_summary <- summary(reg_ex)
+ex_summary
+```
+Qui si nota che *prevratings* è presente in quasi tutti i modelli, ma viene esclusa in quelli con 6 e 7 variabili. *fact* è sempre presente, a parte nel modello con un solo attributo. Anche in questo caso, *march* viene inclusa solo nel modello completo.
+```{r}
+par(mfrow = c(2,2))
+plot(ex_summary$adjr2, xlab = 'numero di attributi', ylab = 'R2 adj', type = 'b', lwd = 2)
+points(10, ex_summary$adjr2[10], col = 'red', cex = 2, pch = 20)
+plot(ex_summary$bic, xlab = 'numero di attributi', ylab = 'BIC', type = 'b', lwd = 2)
+points(4, ex_summary$bic[4], col = 'red', cex = 2, pch = 20)
+plot(ex_summary$cp, xlab = 'numero di attributi', ylab = 'Cp', type = 'b', lwd = 2)
+points(7, ex_summary$cp[7], col = 'red', cex = 2, pch = 20)
+plot(ex_summary$rss, xlab = 'numero di attributi', ylab = 'RSS', type = 'b', lwd = 2)
+points(11, ex_summary$rss[11], col = 'red', cex = 2, pch = 20)
+
+coef(reg_ex, 10)
+coef(reg_ex, 4)
+coef(reg_ex, 7)
+```
+
+## Validazione
+Per valuare il miglior modello, una volta a disposizione quelli ottimali per ogni numero di attributi, è possibile usare vari approcci di validazione.
+
+### Validation set
+La prima idea è quella del *validation set*: il dataset viene diviso in due parti: *train* e *test*. Il modello viene addestrato sul primo insieme e poi applicato al secondo, sui cui poi calcoliamo l'errore di previsione. 
+
+Solitamente si usa una separazione tipo 70/30 o 80/20, tuttavia nel nostro caso questo vorrebbe dire rimuovere un numero di record non indifferente, condiderata la scarsa quantità di dati a disposzione. Questo renderà il modello poco efficiente e troppo dipendente dalla scelta dei due insiemi. 
+
+Proviamo comunque a valutare questo approccio, usando un *training set* fatto dal 70% del dataset originale. A questo insieme applichiamo i modelli ottenuti dalla ricerca esaustiva.
+
+```{r}
+plot.rss = function(SEED){
+  set.seed(SEED)
+  train <- sample(n, round(0.7*n))
+  train.data <- ds[train,]
+  test.data <- ds[-train,]
+  reg <- regsubsets(rating ~ ., data = train.data, nvmax = p)
+  test_mat <- model.matrix(rating ~ ., data = test.data)
+  val_errors = rep(NA,p)
+  
+  # Iterates over each size i
+  for(i in 1:p){
+      # Extract the vector of predictors in the best fit model on i predictors
+      coefi <- coef(reg, id = i)
+      # Make predictions using matrix multiplication of the test matirx and the coefficients vector
+      pred <- test_mat[,names(coefi)]%*%coefi
+      # Calculate the MSE
+      val_errors[i] <- mean((test.data$rating-pred)^2)
+  }
+  plot(val_errors, type = 'b', xlab = 'numero di attributi', ylab = 'RSS', main = paste('seed:', SEED))
+  # Find the model with the smallest error
+  min <- which.min(val_errors)
+  # Plot the errors for each model size
+  points(min, val_errors[min][1], cex = 2, pch = 20, col = 'red')
+  #title(SEED)
+}
+par(mfrow = c(2,2))
+plot.rss(100)
+plot.rss(42)
+plot.rss(50)
+plot.rss(15)
+```
+
+Si nota facilmente che il risultato dipende fortemente dal seme fissato e quindi dal modo in cui viene effettuata la divisione in *train* e *test*. Nei 4 casi in esempio si notano andamenti della curva di errore molto diversi e, come conseguenza, i modelli "ottimali" scelti sono diversi. Si notano in particolare andamenti anomali della curva (molto lontani dalla monotonia) e si vede come le scelte del modello ottimale siano estreme.
+
+### Cross Validation
+Per ovviare ai problemi del *validation set*, si utilizza la *cross-validation*: l'idea di base è proprio quella di ripetere la procedura utilizzata sopra, applicandola a diverse scelte di *training set* e *test set*, per poi confrontare diversi modelli tramite gli errori medi ottenuti.
+
+Usiamo qui la *$K$-fold cross-validation*: il dataset viene diviso in $K$ sottoinsiemi disgiunti $C_k$ , $k=1,...,n$ , ognuno con $n_k$ osservazioni. Per ogni $k$, valutiamo il modello su $C_{-k}$, ovvero su tutto il dataset tranne il $k$-esimo insieme. Alla fine l'errore complessivo sarà la media pesata degli errori dei $k$ modelli.
+
+```{r}
+predict.regsubsets = function(object,newdata,id,...){
+      form <- as.formula(object$call[[2]]) # Extract the formula used when we called regsubsets()
+      mat <- model.matrix(form,newdata)    # Build the model matrix
+      coefi <- coef(object,id=id)          # Extract the coefficiants of the ith model
+      xvars <- names(coefi)                # Pull out the names of the predictors used in the ith model
+      mat[,xvars]%*%coefi                  # Make predictions using matrix multiplication
+}
+```
+
+```{r}
+k <- 10        # number of folds
+set.seed(42)   # set the random seed so we all get the same results
+
+# Assign each observation to a single fold
+folds <- sample(1:k, n, replace = TRUE)
+
+# Create a matrix to store the results of our upcoming calculations
+mse_reg <- rep(NA, k)
+mse_fwd <- matrix(NA, k, p, dimnames = list(NULL, paste(1:p)))
+mse_bwd <- matrix(NA, k, p, dimnames = list(NULL, paste(1:p)))
+mse_ex <- matrix(NA, k, p, dimnames = list(NULL, paste(1:p)))
+
+cv_errors <- matrix(NA, k, p, dimnames = list(NULL, paste(1:p)))
+
+```
+
+```{r}
+for(j in 1:k){
+    train.set <- ds[folds != j,]
+    test.set <- ds[folds == j,]
+    
+    reg <- lm(rating ~ ., data = train.set)
+    reg_fwd <- regsubsets(rating ~ ., data = train.set, nvmax = p, method = 'forward')
+    reg_bwd <- regsubsets(rating ~ ., data = train.set, nvmax = p, method = 'backward')
+    reg_ex <- regsubsets(rating ~ ., data = train.set, nvmax = p)
+    
+
+    pred_reg <- predict(reg, test.set)
+    mse_reg[j] <- mean((test.set$rating-pred_reg)^2)
+    for(i in 1:p){
+        pred_fwd <- predict(reg_fwd, test.set, id = i) 
+        mse_fwd[j,i] <-  mean((test.set$rating - pred_fwd)^2)
+        pred_bwd <- predict(reg_bwd, test.set, id = i)
+        mse_bwd[j,i] <-  mean((test.set$rating - pred_bwd)^2)
+        pred_ex <- predict(reg_ex, test.set, id = i)
+        mse_ex[j,i] <-  mean((test.set$rating - pred_ex)^2)
+      }
+}
+```
+
+```{r}
+# Take the mean of over all folds for each model size
+mean_cv_errors <- apply(mse_ex, 2, mean)
+mean_mse_fwd <- apply(mse_fwd, 2, mean)
+mean_mse_bwd <- apply(mse_bwd, 2, mean)
+mean_mse_ex <- apply(mse_ex, 2, mean)
+
+# Find the model size with the smallest cross-validation error
+min_fwd <- which.min(mean_mse_fwd)
+min_bwd <- which.min(mean_mse_bwd)
+min_ex <- which.min(mean_mse_ex)
+
+# Plot the cross-validation error for each model size, highlight the min
+par(mfrow = c(1,3))
+plot(mean_mse_fwd, type = 'b', xlab = 'numero di attributi', ylab = 'MSE', main = 'forward')
+points(min_fwd, mean_mse_fwd[min_fwd][1], col = "red", cex = 2, pch = 20)
+plot(mean_mse_bwd, type = 'b', xlab = 'numero di attributi', ylab = 'MSE', main = 'backward')
+points(min_bwd, mean_mse_bwd[min_bwd][1], col = "red", cex = 2, pch = 20)
+plot(mean_mse_ex, type = 'b', xlab = 'numero di attributi', ylab = 'MSE', main = 'esaustiva')
+points(min_ex, mean_mse_ex[min_ex][1], col = "red", cex = 2, pch = 20)
+```
+Tutti e tre i modelli ottimali (con $MSE$ minimo) non contengono *march*.
+In particolare, la *backward selection* e la *ricerca esaustiva* selezionano lo stesso modello con 11 attributi, esludendo per l'appunto solo *march*.
+Il modello ottimale con *forward selection*, invece, ha 9 attributi: oltre a *march* viene esclusa *abn*.
+```{r}
+coef(reg_fwd, min_fwd) # Modelllo ottimale con forward selection
+coef(reg_bwd, min_bwd) # Modelllo ottimale con backward selection
+coef(reg_ex, min_ex)   # Modelllo ottimale con ricerca esaustiva
+```
+In definitiva, confrontiamo gli $MSE$ per i modelli ottimali ottenuti:
+```{r}
+metrics <- matrix(c(mean(mse_reg), mean(mse_fwd[,min_fwd]),
+                  mean(mse_bwd[,min_bwd]), mean(mse_ex[,min_ex])),
+                  ncol = 4)
+colnames(metrics) <- c('completo', 'forward', 'backward', 'esaustiva')
+rownames(metrics) <- c('MSE')
+metrics
+```
+Come si vede anche dal grafico, il modello con 9 attributi selezionato dalla *forward selection* sembra essere il migliore in termini di $MSE$. 
+
+
+## Regressione regolarizzata
+Un approccio diverso per gestire il trade-off *bias-varianza* è dato dalla regressione regolarizzata: oltre a minimizzare l'errore quadratico medio della regressione lineare, si applica una penalizzazione ai coefficienti regressivi (eccetto l'intercetta) per evitare l'overfitting. La penalità è gestita tramite il parametro di penalità $lambda$.
+
+Si distringuono due modelli principali a seconda del tipo di penalizzazione: 
+
+* *Ridge* penalizza con la norma euclidea: $||Y-X\beta||_2^2+\lambda ||\beta||_2^2$
+* *Lasso* con la norma 1: $||Y-X\beta||_2^2+\lambda ||\beta||_1$
+
+La norma usata per la penalità influenza notevolmente il risultato, ad esmpio la regolarizzazione nel caso *Ridge* fa tendere al limite i coefficienti a zero, mentre con *Lasso* si applica a tutti gli effetti *feature selection*, portando a zero alcuni coefficienti per $\lambda$ finito.
+
+Proviamo per 100 valori di penalità tra $\lambda = 10^{-5}$ a $\lambda = 10^5$.
+
+```{r}
+lambda_grid <- 10^seq(5, -5, length = 100)
+x <- model.matrix(rating ~ ., data = ds)[,-1]
+y <- ds$rating
+```
+*Regressione Ridge*
+```{r}
+ridge.mod <- glmnet(x, y, alpha = 0, lambda = lambda_grid)
+```
+Ci aspettiamo che quando $\lambda$ è molto alto, i coefficienti di regressione (sempre escludendo l'intercetta) siano molto altri, e viceversa.
+```{r}
+ridge.mod$lambda[90]
+coef(ridge.mod)[,90]
+sqrt(sum(coef(ridge.mod)[-1,90]^2))
+
+ridge.mod$lambda[10]
+coef(ridge.mod)[,10]
+sqrt(sum(coef(ridge.mod)[-1,10]^2))
+```
+
+*Regressione Lasso*
+```{r}
+lasso.mod <- glmnet(x, y, alpha = 1, lambda = lambda_grid)
+lasso.mod$lambda[90]
+coef(lasso.mod)[,90]
+sqrt(sum(coef(lasso.mod)[-1,90]^2))
+```
+Notiamo qui la sostanziale differenza nel comportamento: fino a $\lambda=3.593814$, *Lasso* porta a zero tutti i coefficienti:
+```{r}
+lasso.mod$lambda[45]
+coef(lasso.mod)[,45]
+sqrt(sum(coef(lasso.mod)[-1,45]^2))
+```
+Per $\lambda=0.3511192$, i coefficienti di *abn*, *mon*, *sun* e *march* sono nulli.
+```{r}
+lasso.mod$lambda[55]
+coef(lasso.mod)[,55]
+sqrt(sum(coef(lasso.mod)[-1,55]^2))
+```
+
+```{r}
+par(mfrow = c(1,2))
+plot(ridge.mod)        
+title("Ridge", line = 3)
+plot(lasso.mod)
+title("Lasso", line = 3)
+```
+
+Dai grafici sopra capiamo che la scelta del parametro $\lambda$ risulta cruciale: può determinare completamente il risultato dei modelli.
+
+Per scegliere oppurtamente $\lambda$, applichiamo la *$K$-fold cross-validation* con $K=5$, prima per *Ridge*, poi per *Lasso*.
+```{r}
+cv.ridge <- cv.glmnet(x, y, alpha = 0, nfolds = 5)
+mse_ridge <- cv.ridge$cvm[cv.ridge$lambda == cv.ridge$lambda.min]
+
+plot(cv.ridge, main = 'Ridge')
+opt_ridge_lambda <- cv.ridge$lambda.min
+opt_ridge_lambda
+```
+
+```{r}
+cv.lasso <- cv.glmnet(x, y, alpha = 1, nfolds = 5)
+mse_lasso <- cv.lasso$cvm[cv.lasso$lambda == cv.lasso$lambda.min]
+
+plot(cv.lasso, main = 'Lasso')
+opt_lasso_lambda <- cv.lasso$lambda.min
+opt_lasso_lambda 
+```
+
+```{r}
+opt_ridge <- glmnet(x, y, alpha = 0, lambda = lambda_grid)
+opt_ridge.coef <- predict(ridge.mod, type = "coefficients", s = opt_ridge_lambda)
+opt_ridge.coef
+
+opt_lasso <- glmnet(x, y, alpha = 1, lambda = lambda_grid)
+opt_lasso.coef <- predict(lasso.mod, type = "coefficients", s = opt_lasso_lambda )
+opt_lasso.coef
+```
+
+## Conclusioni
+Per ogni metodo visto, è stato selezionato il modello ottimale rispetto al $MSE$ medio stimato usando la *$k$-fold cross-validation*.
+
+Abbiamo quindi a disposizione 6 modelli e possiamo ora confrontarli.
+```{r}
+metrics <- matrix(c(mean(mse_reg), mean(mse_fwd[,min_fwd]),
+                  mean(mse_bwd[,min_bwd]), mean(mse_ex[,min_ex]), mse_ridge, mse_lasso),
+                  ncol = 6)
+colnames(metrics) <- c('completo', 'forward', 'backward', 'esaustiva', 'ridge', 'lasso')
+rownames(metrics) <- c('MSE')
+metrics
+```
+Il modello ottimale trovato con *Ridge* è in assoluto quello col $MSE$ medio più basso, mentre il peggiore sembra essere il modello trovato con *Lasso*.
+
+Guardando tutti i modelli, si vede come gli attributi più significativi siano, in ordine, *prevrating* e *fact*, mentre i meno significativi sono *march* e *abn*.
